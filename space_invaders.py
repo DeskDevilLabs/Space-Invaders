@@ -9,22 +9,28 @@ from datetime import datetime
 
 pygame.mixer.init()
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+def resource_path(filename):
+    """Get absolute path to resource, works for dev and for PyInstaller exe"""
+    if getattr(sys, 'frozen', False):  # Running as compiled .exe
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, filename)
 
-laser_soundpath = os.path.join(SCRIPT_DIR, "laser.wav")
+laser_soundpath = resource_path("laser.wav")
 laser_sound = pygame.mixer.Sound(laser_soundpath)
 laser_sound.set_volume(0.8)
 
-explosion_soundpath = os.path.join(SCRIPT_DIR, "explosion.wav")
+explosion_soundpath = resource_path("explosion.wav")
 explosion_sound = pygame.mixer.Sound(explosion_soundpath)
 explosion_sound.set_volume(0.8)
 
-game_over_soundpath = os.path.join(SCRIPT_DIR, "game_over.wav")
+game_over_soundpath = resource_path("game_over.wav")
 game_over_sound = pygame.mixer.Sound(game_over_soundpath)
 game_over_sound.set_volume(1)  # Set volume
 
 # Game BGM
-game_bg_soundpath = os.path.join(SCRIPT_DIR, "space_invader_bgm.wav")
+game_bg_soundpath = resource_path("space_invader_bgm.wav")
 game_bg = pygame.mixer.Sound(game_bg_soundpath)
 game_bg.set_volume(0.4)  # Set volume
 game_bg_playing = False  # Track BGM state
@@ -56,35 +62,114 @@ DARK_GRAY = (50, 50, 50)
 FPS = 60
 clock = pygame.time.Clock()
 
+
+def is_new_high_score(self):
+    """Check if the current score is the highest in the leaderboard"""
+    if not self.leaderboard_manager.scores:
+        return True  # No scores yet, so this is automatically the highest
+    
+    top_score = max(entry['score'] for entry in self.leaderboard_manager.scores)
+    return self.score > top_score
+
+
 class LeaderboardManager:
     def __init__(self):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.leaderboard_file = os.path.join(script_dir, "space_invaders_leaderboard.json")
+        self._determine_file_path()
         self.scores = self.load_scores()
-    
-    def reset_scores(self):
-        """Reset all scores in the leaderboard"""
-        self.scores = []
-        self.save_scores()
-        return True
-        
+
+    def _determine_file_path(self):
+        """Determine the appropriate path for the leaderboard file"""
+        try:
+            if getattr(sys, 'frozen', False):
+                # Running as compiled executable
+                if os.name == 'nt':  # Windows
+                    appdata = os.getenv('APPDATA')
+                    save_dir = os.path.join(appdata, 'SpaceInvaders')
+                else:  # Mac/Linux
+                    home = os.path.expanduser('~')
+                    save_dir = os.path.join(home, '.spaceinvaders')
+                
+                # Create directory if it doesn't exist
+                os.makedirs(save_dir, exist_ok=True)
+                self.leaderboard_file = os.path.join(save_dir, "leaderboard.json")
+            else:
+                # Running in development
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                self.leaderboard_file = os.path.join(base_dir, "space_invaders_leaderboard.json")
+                
+            
+        except Exception as e:
+            self.leaderboard_file = "leaderboard_fallback.json"
+
     def load_scores(self):
+        """Load scores from the leaderboard file"""
         try:
             if os.path.exists(self.leaderboard_file):
                 with open(self.leaderboard_file, 'r') as f:
-                    return json.load(f)
-            return []
-        except (json.JSONDecodeError, FileNotFoundError):
-            return []
-    
-    def save_scores(self):
-        try:
-            with open(self.leaderboard_file, 'w') as f:
-                json.dump(self.scores, f, indent=2)
+                    try:
+                        scores = json.load(f)
+                        
+                        return scores
+                    except json.JSONDecodeError as je:
+                        
+                        return self._handle_corrupt_file()
+            else:
+                
+                return []
         except Exception as e:
-            print(f"Error saving leaderboard: {e}")
-    
+            return []
+
+    def _handle_corrupt_file(self):
+        """Handle cases where the leaderboard file is corrupt"""
+        try:
+            # Try to rename the corrupt file for debugging
+            corrupt_path = f"{self.leaderboard_file}.corrupt"
+            if os.path.exists(corrupt_path):
+                os.remove(corrupt_path)
+            os.rename(self.leaderboard_file, corrupt_path)
+            
+        except Exception as e:
+            pass
+        
+        return []
+
+    def save_scores(self):
+        """Save scores to the leaderboard file"""
+        try:
+            # First try saving to primary location
+            self._save_to_file(self.leaderboard_file)
+        except Exception as primary_error:
+            pass
+            
+            # Try saving to fallback location
+            fallback_path = os.path.join(os.path.expanduser('~'), 'space_invaders_leaderboard_fallback.json')
+            try:
+                self._save_to_file(fallback_path)
+                
+            except Exception as fallback_error:
+                
+                raise RuntimeError("Could not save leaderboard to any location")
+
+    def _save_to_file(self, file_path):
+        """Internal method to handle actual file saving"""
+        temp_path = f"{file_path}.tmp"
+        
+        # Write to temporary file first
+        with open(temp_path, 'w') as f:
+            json.dump(self.scores, f, indent=2)
+        
+        # Then rename to final file (atomic operation)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        os.rename(temp_path, file_path)
+        
+        
+
     def add_score(self, score, level):
+        """Add a new score to the leaderboard"""
+        if not isinstance(score, int) or not isinstance(level, int):
+            return False
+        
         entry = {
             'score': score,
             'level': level,
@@ -96,16 +181,38 @@ class LeaderboardManager:
         self.scores.sort(key=lambda x: (-x['score'], -x['level']))
         # Keep only top 10
         self.scores = self.scores[:10]
-        self.save_scores()
+        
+        try:
+            self.save_scores()
+            
+            return True
+        except Exception as e:
+            
+            return False
     
-    def get_top_scores(self):
-        return self.scores[:10]
+    def get_top_scores(self, limit=10):
+        """Get the top scores from the leaderboard"""
+        return self.scores[:limit]
     
     def is_high_score(self, score):
+        """Check if a score would qualify for the leaderboard"""
         if not self.scores:  # If no scores exist yet
             return True
+        
         # Check if score is higher than the lowest score in top 10
-        return len(self.scores) < 10 or score > min(entry['score'] for entry in self.scores)
+        min_score = min(entry['score'] for entry in self.scores)
+        return len(self.scores) < 10 or score > min_score
+        
+    def reset_scores(self):
+        """Reset all scores in the leaderboard"""
+        self.scores = []
+        try:
+            self.save_scores()
+            
+            return True
+        except Exception as e:
+            
+            return False
 
 class Button:
     def __init__(self, x, y, width, height, text, color, hover_color, text_color=WHITE):
@@ -404,18 +511,15 @@ class LogoScreen:
 
         # Keys that should trigger skipping the logos
         self.skip_keys = {
-            pygame.K_TAB, pygame.K_SPACE, pygame.K_RETURN, pygame.K_ESCAPE
+            pygame.K_RETURN, pygame.K_ESCAPE
         }
-        # Add all alphabet and number keys
-        self.skip_keys.update(range(pygame.K_a, pygame.K_z + 1))  # a-z
-        self.skip_keys.update(range(pygame.K_0, pygame.K_9 + 1))  # 0-9
 
     def load_logos(self):
         # Try to load multiple logo images
         logo_paths = [
-            os.path.join(SCRIPT_DIR, "DD Lab1.png"),
-            (os.path.join(SCRIPT_DIR, "logo1.png"), os.path.join(SCRIPT_DIR, "logo2.jpg")),
-            os.path.join(SCRIPT_DIR, "space_invaders.jpg")
+            resource_path("DD Lab1.png"),
+            (resource_path("logo1.png"), resource_path("logo2.jpg")),
+            resource_path("space_invaders.jpg")
         ]
         
         for item in logo_paths:
@@ -1242,7 +1346,13 @@ class Game:
         big_font = pygame.font.Font(None, 72)
         title = big_font.render("LEADERBOARD", True, CYAN)
         screen.blit(title, title.get_rect(center=(SCREEN_WIDTH//2, 100)))
-        
+
+        # Check if this is a new high score and show message if it is
+        if self.game_over and self.is_new_high_score():
+            high_score_font = pygame.font.Font(None, 48)
+            high_score_text = high_score_font.render("NEW HIGH SCORE!", True, YELLOW)
+            screen.blit(high_score_text, high_score_text.get_rect(center=(SCREEN_WIDTH//2, 160)))
+            
         header_font = pygame.font.Font(None, 48)
         rank_header = header_font.render("RANK", True, YELLOW)
         score_header = header_font.render("SCORE", True, YELLOW)
@@ -1266,6 +1376,8 @@ class Game:
         else:
             for i, entry in enumerate(scores):
                 y_pos = 250 + i * 40
+                if self.game_over and self.is_new_high_score():
+                    y_pos += 30  # Adjust position if we showed the high score message
                 
                 color = GREEN if (self.game_over and entry['score'] == self.score and 
                                 entry['level'] == self.level) else WHITE
@@ -1536,7 +1648,7 @@ def star_wars_intro(screen, duration_seconds=11):
     ]
     
     # Set up the crawl
-    pygame.mixer.music.load(os.path.join(SCRIPT_DIR, "space_invader_title.wav"))  # You'll need this file
+    pygame.mixer.music.load(resource_path("space_invader_title.wav"))  # You'll need this file
     pygame.mixer.music.set_volume(0.5)
     pygame.mixer.music.play()
     
@@ -1593,9 +1705,7 @@ def star_wars_intro(screen, duration_seconds=11):
                 sys.exit()
             if event.type == pygame.KEYDOWN:
                 # Check for specific keys to skip
-                if (event.key == pygame.K_RETURN or  # Enter key
-                    event.key == pygame.K_SPACE or    # Space bar
-                    (pygame.K_a <= event.key <= pygame.K_z)):  # Any letter a-z
+                if (event.key == pygame.K_RETURN):  
                     running = False
                     pygame.mixer.music.stop()
                     return
@@ -1642,7 +1752,7 @@ def show_exit_credits():
     pygame.mixer.stop()
     
     # Load outro music (replace with your actual file path)
-    outro_music_path = os.path.join(SCRIPT_DIR, "outro_music.wav")  # or .ogg
+    outro_music_path = resource_path("outro_music.wav")  # or .ogg
     try:
         outro_music = pygame.mixer.Sound(outro_music_path)
         outro_music.set_volume(0.7)  # Adjust volume as needed
@@ -1687,12 +1797,9 @@ def show_exit_credits():
     
     # Keys that should trigger skipping the credits
     skip_keys = {
-        pygame.K_TAB, pygame.K_SPACE, pygame.K_RETURN, pygame.K_ESCAPE
+        pygame.K_RETURN, pygame.K_ESCAPE
     }
-    # Add all alphabet and number keys
-    skip_keys.update(range(pygame.K_a, pygame.K_z + 1))  # a-z
-    skip_keys.update(range(pygame.K_0, pygame.K_9 + 1))  # 0-9
-    
+        
     # Main loop
     running = True
     while running:
